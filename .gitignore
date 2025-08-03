@@ -1,0 +1,62 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+go-lambda-api
+bootstrap
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Serverless Framework
+.serverless/
+node_modules/
+package-lock.json
+
+# Air temp files
+tmp/
+build-errors.log
+
+# Task temp files
+.task/
+
+# Lambda build artifacts
+bin/
+dist/
+
+# PostgreSQL layer build artifacts
+postgres-layer/opt/
+
+# Swagger/OpenAPI documentation
+docs/
+!cmd/docs/
+*.swagger.json
+*.swagger.yaml

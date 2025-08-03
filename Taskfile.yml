@@ -1,0 +1,135 @@
+version: "3"
+
+vars:
+  BINARY_NAME: "go-postgres-s3-backup"
+  LAMBDA_BINARY: "bootstrap"
+
+tasks:
+  run:
+    desc: Run the backup function locally
+    dotenv: ['.env']
+    cmds:
+      - go run ./cmd/lambda/main.go
+
+  build:postgres-layer:
+    desc: Build PostgreSQL layer for AWS Lambda
+    dir: postgres-layer
+    cmds:
+      - ./build.sh
+
+  build:lambda:
+    desc: Build for AWS Lambda
+    deps: [build:postgres-layer]
+    cmds:
+      - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags='-s -w' -o {{.LAMBDA_BINARY}} ./cmd/lambda
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test -v ./...
+
+  test:coverage:
+    desc: Run tests with coverage
+    cmds:
+      - go test -v -coverprofile=coverage.out ./...
+      - go tool cover -func=coverage.out
+
+  fmt:check:
+    desc: Check Go code formatting
+    cmds:
+      - test -z "$(gofmt -l .)"
+
+  lint:
+    desc: Run linter
+    cmds:
+      - golangci-lint run
+
+  mod:
+    desc: Download and tidy Go modules
+    cmds:
+      - go mod download
+      - go mod tidy
+
+  mod:update:
+    desc: Update Go modules
+    cmds:
+      - go get -u ./...
+      - go mod tidy
+
+  mod:verify:
+    desc: Verify Go module dependencies
+    cmds:
+      - go mod verify
+
+  fmt:
+    desc: Format Go code
+    cmds:
+      - gofmt -w -s .
+
+  vuln:check:
+    desc: Check for vulnerabilities using govulncheck
+    cmds:
+      - govulncheck ./...
+    preconditions:
+      - sh: command -v govulncheck
+        msg: "govulncheck is not installed. Please run: go install golang.org/x/vuln/cmd/govulncheck@latest"
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf bin/
+      - rm -f {{.LAMBDA_BINARY}}
+      - rm -f coverage.out
+
+  serverless:deploy:
+    desc: Deploy to AWS Lambda using Serverless Framework
+    dotenv: ['.env']
+    deps: [build:lambda]
+    cmds:
+      - serverless deploy --stage {{.STAGE | default "dev"}} --region {{.REGION | default "us-west-1"}}
+
+  serverless:remove:
+    desc: Remove serverless deployment
+    dotenv: ['.env']
+    cmds:
+      - serverless remove --stage {{.STAGE | default "dev"}} --region {{.REGION | default "us-west-1"}}
+
+  serverless:logs:
+    desc: View serverless function logs
+    dotenv: ['.env']
+    cmds:
+      - serverless logs -f backup --stage {{.STAGE | default "dev"}} --tail
+
+  serverless:invoke:
+    desc: Manually invoke the backup function
+    dotenv: ['.env']
+    cmds:
+      - serverless invoke -f backup --stage {{.STAGE | default "dev"}}
+
+  sls:deploy:
+    desc: Deploy to AWS Lambda (alias for serverless:deploy)
+    deps: [serverless:deploy]
+
+  sls:remove:
+    desc: Remove serverless deployment (alias for serverless:remove)
+    deps: [serverless:remove]
+
+  sls:logs:
+    desc: View serverless function logs (alias for serverless:logs)
+    deps: [serverless:logs]
+
+  deploy:
+    desc: Deploy to AWS Lambda (alias for serverless:deploy)
+    deps: [serverless:deploy]
+
+  logs:
+    desc: View Lambda logs (alias for serverless:logs)
+    deps: [serverless:logs]
+
+  invoke:
+    desc: Manually trigger backup (alias for serverless:invoke)
+    deps: [serverless:invoke]
+
+  default:
+    desc: Default task (format, test, build)
+    deps: [fmt, test, build:lambda]

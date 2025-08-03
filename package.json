@@ -1,0 +1,16 @@
+{
+  "name": "go-lambda-api",
+  "version": "1.0.0",
+  "description": "Serverless deployment configuration for Go Lambda API",
+  "scripts": {
+    "deploy": "serverless deploy",
+    "remove": "serverless remove",
+    "logs": "serverless logs -f api --tail"
+  },
+  "devDependencies": {
+    "serverless": "^3.38.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

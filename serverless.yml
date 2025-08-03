@@ -1,0 +1,103 @@
+service: go-postgres-s3-backup
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: provided.al2
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-west-1'}
+  memorySize: 512
+  timeout: 300  # 5 minutes for database backup
+  environment:
+    DATABASE_URL: ${env:DATABASE_URL}
+    BACKUP_BUCKET: ${self:custom.backupBucket}
+  
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: 'arn:aws:logs:*:*:*'
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObject
+            - s3:ListBucket
+            - s3:HeadObject
+          Resource:
+            - !GetAtt BackupBucket.Arn
+            - !Join ['', [!GetAtt BackupBucket.Arn, '/*']]
+
+custom:
+  backupBucket: !Ref BackupBucket
+
+functions:
+  backup:
+    handler: bootstrap
+    architecture: arm64
+    layers:
+      - { Ref: PostgresLambdaLayer }
+    events:
+      # Run daily at 2 AM UTC
+      - schedule:
+          rate: cron(0 2 * * ? *)
+          enabled: true
+          description: Daily PostgreSQL database backup
+    environment:
+      DATABASE_URL: ${env:DATABASE_URL}
+      BACKUP_BUCKET: ${self:custom.backupBucket}
+
+layers:
+  postgres:
+    path: postgres-layer
+    description: PostgreSQL client tools (pg_dump, psql)
+    compatibleRuntimes:
+      - provided.al2
+    compatibleArchitectures:
+      - arm64
+
+resources:
+  Resources:
+    BackupBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-${self:provider.stage}-backups
+        LifecycleConfiguration:
+          Rules:
+            # Transition monthly backups to Glacier after 30 days
+            - Id: TransitionMonthlyToGlacier
+              Status: Enabled
+              Prefix: monthly/
+              Transitions:
+                - TransitionInDays: 30
+                  StorageClass: GLACIER
+            # Transition yearly backups to Deep Archive after 90 days
+            - Id: TransitionYearlyToDeepArchive
+              Status: Enabled
+              Prefix: yearly/
+              Transitions:
+                - TransitionInDays: 90
+                  StorageClass: DEEP_ARCHIVE
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        VersioningConfiguration:
+          Status: Enabled
+
+# Package configuration
+package:
+  patterns:
+    - bootstrap
+    - '!node_modules/**'
+    - '!.git/**'
