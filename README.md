@@ -69,12 +69,21 @@ That's it! Your PostgreSQL database will be backed up daily at 2 AM UTC.
    - Monthly backups transition to Glacier after 30 days
    - Yearly backups transition to Deep Archive after 90 days
 
-## Manual Execution
+## Manual Operations
 
-To manually trigger a backup:
-
+**Trigger a backup:**
 ```bash
-serverless invoke -f backup
+task invoke
+```
+
+**View logs:**
+```bash
+task logs
+```
+
+**Remove deployment:**
+```bash
+task sls:remove
 ```
 
 ## Monitoring
@@ -91,6 +100,23 @@ aws s3 ls s3://go-postgres-s3-backup-[stage]-backups/yearly/
 
 ```bash
 aws s3 cp s3://go-postgres-s3-backup-[stage]-backups/daily/2025-08-01-backup.sql ./
+```
+
+## Testing Backups Locally
+
+**Start local PostgreSQL:**
+```bash
+docker run --name my-postgres -e POSTGRES_PASSWORD=postgres -d -p 5432:5432 postgres
+```
+
+**Restore backup to local instance:**
+```bash
+docker exec -i my-postgres psql -U postgres -d postgres -W < [backup-file].sql
+```
+
+**Connect and query:**
+```bash
+docker exec -it my-postgres psql -U postgres
 ```
 
 ## Environment Variables
@@ -134,18 +160,9 @@ Ensure your PostgreSQL database allows connections from AWS Lambda:
 
 Check the Lambda logs for errors:
 ```bash
-serverless logs -f backup --tail
+task logs
 ```
 
-## Remove Deployment
-
-To remove all AWS resources:
-
-```bash
-serverless remove --stage production
-```
-
-**Warning**: This will delete the S3 bucket and all backups. Download any backups you want to keep first.
 
 ## License
 
