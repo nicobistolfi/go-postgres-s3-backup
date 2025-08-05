@@ -206,6 +206,7 @@ func (h *BackupHandler) createBackup(ctx context.Context) ([]byte, error) {
 		"--clean",
 		"--if-exists",
 		"--exclude-schema=supabase_migrations",
+		"--no-comments",
 	)
 	
 	// Capture output
