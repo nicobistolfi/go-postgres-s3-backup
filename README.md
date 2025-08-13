@@ -71,6 +71,14 @@ That's it! Your PostgreSQL database will be backed up daily at 2 AM UTC.
    - Monthly backups transition to Glacier after 30 days
    - Yearly backups transition to Deep Archive after 90 days
 
+## Screenshots
+
+### S3 Bucket Structure
+![S3 Backups Overview](docs/go-postgres-s3-backup-backups.png)
+
+### Daily Backups
+![Daily Backups](docs/go-postgres-s3-backup-backups-daily.png)
+
 ## Manual Operations
 
 **Trigger a backup:**
