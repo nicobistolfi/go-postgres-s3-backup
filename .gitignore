@@ -36,10 +36,10 @@ Thumbs.db
 .env.local
 .env.*.local
 
-# Serverless Framework
-.serverless/
-node_modules/
-package-lock.json
+# CloudFormation artifacts
+bootstrap.zip
+postgres-layer.zip
+cloudformation/template.packaged.yml
 
 # Air temp files
 tmp/

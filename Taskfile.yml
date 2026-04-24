@@ -3,6 +3,11 @@ version: "3"
 vars:
   BINARY_NAME: "go-postgres-s3-backup"
   LAMBDA_BINARY: "bootstrap"
+  LAMBDA_ZIP: "bootstrap.zip"
+  LAYER_ZIP: "postgres-layer.zip"
+  STACK_PREFIX: "go-postgres-s3-backup"
+  CF_TEMPLATE: "cloudformation/template.yml"
+  CF_PACKAGED_TEMPLATE: "cloudformation/template.packaged.yml"
 
 tasks:
   run:
@@ -79,56 +84,99 @@ tasks:
     cmds:
       - rm -rf bin/
       - rm -f {{.LAMBDA_BINARY}}
+      - rm -f {{.LAMBDA_ZIP}}
+      - rm -f {{.LAYER_ZIP}}
+      - rm -f {{.CF_PACKAGED_TEMPLATE}}
       - rm -f coverage.out
 
-  serverless:deploy:
-    desc: Deploy to AWS Lambda using Serverless Framework
+  cf:package:
+    desc: Build the Lambda binary and layer, zip them, and upload via `aws cloudformation package`
     dotenv: ['.env']
     deps: [build:lambda]
+    vars:
+      STAGE: '{{.STAGE | default "dev"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
-      - serverless deploy --stage {{.STAGE | default "dev"}} --region {{.REGION | default "us-west-1"}}
+      - zip -j {{.LAMBDA_ZIP}} {{.LAMBDA_BINARY}}
+      - cd postgres-layer && zip -r ../{{.LAYER_ZIP}} opt
+      - |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-{{.STACK_PREFIX}}-artifacts-${ACCOUNT_ID}-{{.REGION}}}"
+        if ! aws s3api head-bucket --bucket "$ARTIFACT_BUCKET" --region {{.REGION}} 2>/dev/null; then
+          aws s3 mb "s3://$ARTIFACT_BUCKET" --region {{.REGION}}
+        fi
+        aws cloudformation package \
+          --template-file {{.CF_TEMPLATE}} \
+          --s3-bucket "$ARTIFACT_BUCKET" \
+          --output-template-file {{.CF_PACKAGED_TEMPLATE}} \
+          --region {{.REGION}}
 
-  serverless:remove:
-    desc: Remove serverless deployment
+  cf:deploy:
+    desc: Deploy the stack via CloudFormation
     dotenv: ['.env']
+    deps: [cf:package]
+    vars:
+      STAGE: '{{.STAGE | default "dev"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
-      - serverless remove --stage {{.STAGE | default "dev"}} --region {{.REGION | default "us-west-1"}}
+      - |
+        if [ -z "${DATABASE_URL:-}" ]; then
+          echo "DATABASE_URL is required (set it in .env or export it)" >&2
+          exit 1
+        fi
+        aws cloudformation deploy \
+          --template-file {{.CF_PACKAGED_TEMPLATE}} \
+          --stack-name {{.STACK_PREFIX}}-{{.STAGE}} \
+          --parameter-overrides \
+              Stage={{.STAGE}} \
+              DatabaseUrl="$DATABASE_URL" \
+              DailyBackupRetentionDays="${DAILY_BACKUP_RETENTION_DAYS:-7}" \
+          --capabilities CAPABILITY_NAMED_IAM \
+          --region {{.REGION}} \
+          --no-fail-on-empty-changeset
+      - aws cloudformation describe-stacks --stack-name {{.STACK_PREFIX}}-{{.STAGE}} --region {{.REGION}} --query 'Stacks[0].Outputs' --output table
 
-  serverless:logs:
-    desc: View serverless function logs
+  cf:remove:
+    desc: Delete the CloudFormation stack (backup bucket is retained)
     dotenv: ['.env']
+    vars:
+      STAGE: '{{.STAGE | default "dev"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
-      - serverless logs -f backup --stage {{.STAGE | default "dev"}} --tail
+      - aws cloudformation delete-stack --stack-name {{.STACK_PREFIX}}-{{.STAGE}} --region {{.REGION}}
+      - aws cloudformation wait stack-delete-complete --stack-name {{.STACK_PREFIX}}-{{.STAGE}} --region {{.REGION}}
+      - echo "Stack deleted. Backup bucket was retained - delete it manually if no longer needed."
 
-  serverless:invoke:
-    desc: Manually invoke the backup function
+  cf:logs:
+    desc: Tail CloudWatch logs for the Lambda
     dotenv: ['.env']
+    vars:
+      STAGE: '{{.STAGE | default "dev"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
-      - serverless invoke -f backup --stage {{.STAGE | default "dev"}}
+      - aws logs tail /aws/lambda/{{.STACK_PREFIX}}-{{.STAGE}} --follow --region {{.REGION}}
 
-  sls:deploy:
-    desc: Deploy to AWS Lambda (alias for serverless:deploy)
-    deps: [serverless:deploy]
-
-  sls:remove:
-    desc: Remove serverless deployment (alias for serverless:remove)
-    deps: [serverless:remove]
-
-  sls:logs:
-    desc: View serverless function logs (alias for serverless:logs)
-    deps: [serverless:logs]
+  cf:invoke:
+    desc: Manually invoke the backup Lambda
+    dotenv: ['.env']
+    vars:
+      STAGE: '{{.STAGE | default "dev"}}'
+      REGION: '{{.REGION | default "us-west-1"}}'
+    cmds:
+      - aws lambda invoke --function-name {{.STACK_PREFIX}}-{{.STAGE}} --region {{.REGION}} /tmp/invoke-out.json
+      - cat /tmp/invoke-out.json
 
   deploy:
-    desc: Deploy to AWS Lambda (alias for serverless:deploy)
-    deps: [serverless:deploy]
+    desc: Deploy to AWS via CloudFormation (alias for cf:deploy)
+    deps: [cf:deploy]
 
   logs:
-    desc: View Lambda logs (alias for serverless:logs)
-    deps: [serverless:logs]
+    desc: Tail Lambda logs (alias for cf:logs)
+    deps: [cf:logs]
 
   invoke:
-    desc: Manually trigger backup (alias for serverless:invoke)
-    deps: [serverless:invoke]
+    desc: Manually trigger backup (alias for cf:invoke)
+    deps: [cf:invoke]
 
   default:
     desc: Default task (format, test, build)
