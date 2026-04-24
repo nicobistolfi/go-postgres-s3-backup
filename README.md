@@ -8,7 +8,7 @@ A serverless backup solution for PostgreSQL databases using AWS Lambda, with aut
 
 - ✅ Automated daily backups of your PostgreSQL database
 - ✅ Intelligent backup rotation (daily, monthly, yearly)
-- ✅ Daily backups retained for 7 days
+- ✅ Daily backups retained for configurable period (default 7 days)
 - ✅ Monthly backups automatically transitioned to Glacier storage
 - ✅ Yearly backups moved to Deep Archive for long-term retention
 - ✅ Serverless architecture with AWS Lambda
@@ -66,7 +66,7 @@ That's it! Your PostgreSQL database will be backed up daily at 2 AM UTC.
 3. **Daily Backup**: Saves the backup to S3 under `daily/YYYY-MM-DD-backup.sql`
 4. **Monthly Backup**: If no backup exists for the current month, copies the daily backup to `monthly/YYYY-MM-backup.sql`
 5. **Yearly Backup**: If no backup exists for the current year, copies the daily backup to `yearly/YYYY-backup.sql`
-6. **Cleanup**: Removes daily backups older than 7 days
+6. **Cleanup**: Removes daily backups older than configured retention period (default 7 days)
 7. **Lifecycle Management**: 
    - Monthly backups transition to Glacier after 30 days
    - Yearly backups transition to Deep Archive after 90 days
@@ -131,10 +131,11 @@ docker exec -it my-postgres psql -U postgres
 
 ## Environment Variables
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `DATABASE_URL` | PostgreSQL connection string | Yes |
-| `BACKUP_BUCKET` | S3 bucket name (auto-configured by Serverless) | Auto |
+| Variable | Description | Required | Default |
+|----------|-------------|----------|----------|
+| `DATABASE_URL` | PostgreSQL connection string | Yes | - |
+| `BACKUP_BUCKET` | S3 bucket name (auto-configured by Serverless) | Auto | - |
+| `DAILY_BACKUP_RETENTION_DAYS` | Number of days to retain daily backups | No | 7 |
 
 ## Security
 
@@ -147,7 +148,7 @@ docker exec -it my-postgres psql -U postgres
 ## Cost Optimization
 
 - Lambda runs only once per day (minimal compute costs)
-- Daily backups are automatically deleted after 7 days
+- Daily backups are automatically deleted after the retention period (configurable, default 7 days)
 - Monthly backups move to cheaper Glacier storage
 - Yearly backups move to Deep Archive for maximum cost savings
 

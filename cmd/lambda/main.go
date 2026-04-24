@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -171,7 +172,7 @@ func (h *BackupHandler) HandleRequest(ctx context.Context) error {
 		}
 	}
 
-	// Clean up old daily backups (keep only last 7 days)
+	// Clean up old daily backups (retention period from DAILY_BACKUP_RETENTION_DAYS env var, default 7 days)
 	if err := h.cleanupOldDailyBackups(ctx); err != nil {
 		log.Printf("Warning: failed to clean up old daily backups: %v", err)
 	}
@@ -425,8 +426,19 @@ func (h *BackupHandler) cleanupOldDailyBackups(ctx context.Context) error {
 		return fmt.Errorf("failed to list daily backups: %w", err)
 	}
 
-	// Calculate cutoff date (7 days ago)
-	cutoff := time.Now().AddDate(0, 0, -7)
+	// Get retention days from environment variable, default to 7
+	retentionDays := 7
+	if retentionEnv := os.Getenv("DAILY_BACKUP_RETENTION_DAYS"); retentionEnv != "" {
+		if parsed, err := strconv.Atoi(retentionEnv); err == nil && parsed > 0 {
+			retentionDays = parsed
+			log.Printf("Using custom retention period: %d days", retentionDays)
+		} else {
+			log.Printf("Warning: Invalid DAILY_BACKUP_RETENTION_DAYS value '%s', using default 7 days", retentionEnv)
+		}
+	}
+
+	// Calculate cutoff date based on retention days
+	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 
 	// Delete old backups
 	for _, obj := range resp.Contents {
