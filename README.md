@@ -1,6 +1,6 @@
 # Go PostgreSQL S3 Backup
 
-![Backup Banner](https://nico.bistol.fi/static/images/shutdown.jpeg)
+![Backup Banner](shutdown.jpeg)
 
 A serverless backup solution for PostgreSQL databases using AWS Lambda, with automatic daily, monthly, and yearly backup rotation to S3.
 
