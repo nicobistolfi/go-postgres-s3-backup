@@ -1,6 +1,6 @@
 # .github/actions/go-setup/action.yml
 name: 'Go Environment Setup'
-description: 'Sets up Go, installs Go Task, and swag for documentation generation.'
+description: 'Sets up Go and installs Go Task.'
 inputs:
   go-version:
     description: 'The Go version to set up.'
@@ -23,10 +23,8 @@ runs:
       uses: actions/cache@v4
       id: cache-go-tools
       with:
-        path: |
-          ~/go/bin/task
-          ~/go/bin/swag
-        key: go-tools-${{ runner.os }}-${{ inputs.go-version }}-task-v3-swag-latest
+        path: ~/go/bin/task
+        key: go-tools-${{ runner.os }}-${{ inputs.go-version }}-task-v3
         restore-keys: |
           go-tools-${{ runner.os }}-${{ inputs.go-version }}-
 
@@ -35,24 +33,3 @@ runs:
       shell: bash
       run: |
         go install github.com/go-task/task/v3/cmd/task@latest
-
-    - name: Install swag for docs generation
-      if: steps.cache-go-tools.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        go install github.com/swaggo/swag/cmd/swag@latest
-
-    - name: Cache generated docs
-      uses: actions/cache@v4
-      id: cache-docs
-      with:
-        path: docs/
-        key: swagger-docs-${{ runner.os }}-${{ hashFiles('cmd/docs/main.go', 'internal/handlers/*.go', 'internal/types/*.go') }}
-        restore-keys: |
-          swagger-docs-${{ runner.os }}-
-
-    - name: Generate documentation
-      if: steps.cache-docs.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        task docs

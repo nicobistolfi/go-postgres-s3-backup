@@ -11,7 +11,7 @@ A serverless backup solution for PostgreSQL databases using AWS Lambda, with aut
 - ✅ Daily backups retained for configurable period (default 7 days)
 - ✅ Monthly backups automatically transitioned to Glacier storage
 - ✅ Yearly backups moved to Deep Archive for long-term retention
-- ✅ Serverless architecture with AWS Lambda
+- ✅ Deployed via AWS CloudFormation
 - ✅ S3 bucket encryption and versioning enabled
 - ✅ Uses pgx/v5 for efficient PostgreSQL connectivity
 
@@ -22,7 +22,9 @@ A serverless backup solution for PostgreSQL databases using AWS Lambda, with aut
 ├── cmd/
 │   └── lambda/
 │       └── main.go           # Lambda function entry point
-├── serverless.yml            # Serverless Framework configuration
+├── cloudformation/
+│   └── template.yml          # CloudFormation stack definition
+├── postgres-layer/           # Lambda layer with pg_dump/psql
 ├── Taskfile.yml              # Task runner configuration
 ├── .env                      # Environment variables (not in repo)
 ├── .gitignore                # Git ignore file
@@ -34,9 +36,8 @@ A serverless backup solution for PostgreSQL databases using AWS Lambda, with aut
 
 - Go 1.21+
 - [Task](https://taskfile.dev)
-- Docker (for building PostgreSQL layer)
+- Docker (for building the PostgreSQL layer)
 - AWS CLI configured
-- Node.js + npm (for Serverless Framework)
 
 ## Quick Start
 
@@ -44,7 +45,6 @@ A serverless backup solution for PostgreSQL databases using AWS Lambda, with aut
 ```bash
 git clone https://github.com/nicobistolfi/go-postgres-s3-backup.git
 cd go-postgres-s3-backup
-npm install -g serverless
 ```
 
 2. **Configure database**
@@ -93,8 +93,10 @@ task logs
 
 **Remove deployment:**
 ```bash
-task sls:remove
+task cf:remove
 ```
+
+> The S3 backup bucket is retained on stack removal. Delete it manually if you no longer need the backups.
 
 ## Monitoring
 
@@ -134,7 +136,7 @@ docker exec -it my-postgres psql -U postgres
 | Variable | Description | Required | Default |
 |----------|-------------|----------|----------|
 | `DATABASE_URL` | PostgreSQL connection string | Yes | - |
-| `BACKUP_BUCKET` | S3 bucket name (auto-configured by Serverless) | Auto | - |
+| `BACKUP_BUCKET` | S3 bucket name (auto-configured by CloudFormation) | Auto | - |
 | `DAILY_BACKUP_RETENTION_DAYS` | Number of days to retain daily backups | No | 7 |
 
 ## Security
@@ -157,8 +159,8 @@ docker exec -it my-postgres psql -U postgres
 ### Lambda timeout issues
 
 If your database is large and backups are timing out:
-1. Increase the timeout in `serverless.yml` (currently set to 300 seconds)
-2. Consider increasing the Lambda memory allocation
+1. Increase the `Timeout` parameter when deploying (default 300 seconds) or the default in `cloudformation/template.yml`
+2. Consider increasing the `MemorySize` parameter (default 512 MB)
 
 ### Connection issues
 

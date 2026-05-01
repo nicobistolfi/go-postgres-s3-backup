@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Go PostgreSQL S3 Backup - scheduled Lambda (provided.al2, arm64) that dumps Postgres to S3
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    Description: Deployment stage (used as a suffix for resource names)
+  DatabaseUrl:
+    Type: String
+    NoEcho: true
+    Description: PostgreSQL connection string passed to the Lambda as DATABASE_URL
+  DailyBackupRetentionDays:
+    Type: Number
+    Default: 7
+    Description: Number of days to retain daily backups before pruning
+  MemorySize:
+    Type: Number
+    Default: 512
+  Timeout:
+    Type: Number
+    Default: 300
+    Description: Lambda timeout in seconds (default 5 minutes for database backup)
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+
+Resources:
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'go-postgres-s3-backup-${Stage}-backups'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionMonthlyToGlacier
+            Status: Enabled
+            Prefix: monthly/
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: GLACIER
+          - Id: TransitionYearlyToDeepArchive
+            Status: Enabled
+            Prefix: yearly/
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: DEEP_ARCHIVE
+
+  PostgresLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub 'go-postgres-s3-backup-postgres-${Stage}'
+      Description: PostgreSQL client tools (pg_dump, psql)
+      Content: ../postgres-layer.zip
+      CompatibleRuntimes:
+        - provided.al2
+      CompatibleArchitectures:
+        - arm64
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'go-postgres-s3-backup-${Stage}-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:HeadObject
+                Resource:
+                  - !GetAtt BackupBucket.Arn
+                  - !Sub '${BackupBucket.Arn}/*'
+
+  BackupLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/go-postgres-s3-backup-${Stage}'
+      RetentionInDays: !Ref LogRetentionDays
+
+  BackupFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: BackupLogGroup
+    Properties:
+      FunctionName: !Sub 'go-postgres-s3-backup-${Stage}'
+      Runtime: provided.al2
+      Handler: bootstrap
+      Code: ../bootstrap.zip
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: !Ref MemorySize
+      Timeout: !Ref Timeout
+      Architectures:
+        - arm64
+      Layers:
+        - !Ref PostgresLayer
+      Environment:
+        Variables:
+          DATABASE_URL: !Ref DatabaseUrl
+          BACKUP_BUCKET: !Ref BackupBucket
+          DAILY_BACKUP_RETENTION_DAYS: !Ref DailyBackupRetentionDays
+
+  ScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'go-postgres-s3-backup-${Stage}-daily'
+      Description: Daily PostgreSQL database backup
+      ScheduleExpression: cron(0 2 * * ? *)
+      State: ENABLED
+      Targets:
+        - Id: BackupFunctionTarget
+          Arn: !GetAtt BackupFunction.Arn
+
+  ScheduleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BackupFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduleRule.Arn
+
+Outputs:
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref BackupFunction
+  FunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt BackupFunction.Arn
+  BackupBucketName:
+    Description: S3 bucket that stores backups
+    Value: !Ref BackupBucket
