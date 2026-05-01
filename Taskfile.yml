@@ -16,6 +16,11 @@ tasks:
     cmds:
       - go run ./cmd/lambda/main.go
 
+  build:
+    desc: Compile Go packages
+    cmds:
+      - go build ./...
+
   build:postgres-layer:
     desc: Build PostgreSQL layer for AWS Lambda
     dir: postgres-layer
