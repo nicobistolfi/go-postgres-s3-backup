@@ -78,7 +78,7 @@ func parseDatabaseURL(dbURL string) (DatabaseConfig, error) {
 	}
 
 	password, _ := u.User.Password()
-	
+
 	// Default port to 5432 if not specified
 	port := u.Port()
 	if port == "" {
@@ -185,17 +185,17 @@ func (h *BackupHandler) createBackup(ctx context.Context) ([]byte, error) {
 	// Debug: Log current environment
 	log.Printf("Current PATH: %s", os.Getenv("PATH"))
 	log.Printf("Current LD_LIBRARY_PATH: %s", os.Getenv("LD_LIBRARY_PATH"))
-	
+
 	// Set PATH to include layer binaries (note: layer creates /opt/opt/bin structure)
-	os.Setenv("PATH", "/opt/opt/bin:"+os.Getenv("PATH"))
-	
+	_ = os.Setenv("PATH", "/opt/opt/bin:"+os.Getenv("PATH"))
+
 	// Set library path for shared libraries
-	os.Setenv("LD_LIBRARY_PATH", "/opt/opt/lib:"+os.Getenv("LD_LIBRARY_PATH"))
-	
+	_ = os.Setenv("LD_LIBRARY_PATH", "/opt/opt/lib:"+os.Getenv("LD_LIBRARY_PATH"))
+
 	// Debug: Log updated environment
 	log.Printf("Updated PATH: %s", os.Getenv("PATH"))
 	log.Printf("Updated LD_LIBRARY_PATH: %s", os.Getenv("LD_LIBRARY_PATH"))
-	
+
 	// Debug: Check what's in /opt
 	if entries, err := os.ReadDir("/opt"); err == nil {
 		log.Printf("Contents of /opt: %v", entries)
@@ -209,10 +209,10 @@ func (h *BackupHandler) createBackup(ctx context.Context) ([]byte, error) {
 	} else {
 		log.Printf("Error reading /opt directory: %v", err)
 	}
-	
+
 	// Set PostgreSQL password via environment
-	os.Setenv("PGPASSWORD", h.dbConfig.Password)
-	
+	_ = os.Setenv("PGPASSWORD", h.dbConfig.Password)
+
 	// Check if pg_dump binary exists
 	pgDumpPath := "/opt/opt/bin/pg_dump"
 	if _, err := os.Stat(pgDumpPath); os.IsNotExist(err) {
@@ -223,9 +223,9 @@ func (h *BackupHandler) createBackup(ctx context.Context) ([]byte, error) {
 			return nil, fmt.Errorf("pg_dump binary not found in /opt/opt/bin or PATH: %w", lookupErr)
 		}
 	}
-	
+
 	log.Printf("Using pg_dump at: %s", pgDumpPath)
-	
+
 	// Build pg_dump command with full path
 	// Note: PostgreSQL 14 supports SCRAM auth and modern options
 	cmd := exec.CommandContext(ctx, pgDumpPath,
@@ -241,39 +241,39 @@ func (h *BackupHandler) createBackup(ctx context.Context) ([]byte, error) {
 		"--exclude-schema=supabase_migrations",
 		"--no-comments",
 	)
-	
+
 	// Capture output
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	
+
 	// Run pg_dump
 	log.Println("Executing pg_dump...")
 	err := cmd.Run()
-	
+
 	// Log stderr (pg_dump writes progress info to stderr)
 	if stderr.Len() > 0 {
 		log.Printf("pg_dump stderr: %s", stderr.String())
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("pg_dump failed: %w\nstderr: %s", err, stderr.String())
 	}
-	
+
 	backupData := stdout.Bytes()
-	
+
 	// Remove timestamp comments that cause unnecessary duplicates
 	backupData = h.removeTimestampComments(backupData)
-	
+
 	log.Printf("Backup created successfully, size: %d bytes", len(backupData))
-	
+
 	return backupData, nil
 }
 
 func (h *BackupHandler) removeTimestampComments(data []byte) []byte {
 	lines := bytes.Split(data, []byte("\n"))
 	var filtered [][]byte
-	
+
 	for _, line := range lines {
 		// Skip lines that start with "-- Started on" or "-- Completed on"
 		if bytes.HasPrefix(line, []byte("-- Started on ")) ||
@@ -282,7 +282,7 @@ func (h *BackupHandler) removeTimestampComments(data []byte) []byte {
 		}
 		filtered = append(filtered, line)
 	}
-	
+
 	return bytes.Join(filtered, []byte("\n"))
 }
 
@@ -294,11 +294,11 @@ func (h *BackupHandler) findMostRecentBackup(ctx context.Context, prefix string)
 	if err != nil {
 		return "", err
 	}
-	
+
 	if len(resp.Contents) == 0 {
 		return "", nil
 	}
-	
+
 	// Find the most recent backup by LastModified time
 	var mostRecent types.Object
 	var found bool
@@ -308,11 +308,11 @@ func (h *BackupHandler) findMostRecentBackup(ctx context.Context, prefix string)
 			found = true
 		}
 	}
-	
+
 	if found {
 		return *mostRecent.Key, nil
 	}
-	
+
 	return "", nil
 }
 
@@ -330,14 +330,14 @@ func (h *BackupHandler) getObjectChecksum(ctx context.Context, key string) (stri
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Check if we stored the checksum in metadata
 	if resp.Metadata != nil {
 		if checksum, ok := resp.Metadata["sha256"]; ok {
 			return checksum, nil
 		}
 	}
-	
+
 	// If no checksum in metadata, we need to download and calculate
 	// This is for backwards compatibility with existing backups
 	getResp, err := h.s3Client.GetObject(ctx, &s3.GetObjectInput{
@@ -347,35 +347,14 @@ func (h *BackupHandler) getObjectChecksum(ctx context.Context, key string) (stri
 	if err != nil {
 		return "", err
 	}
-	defer getResp.Body.Close()
-	
+	defer func() { _ = getResp.Body.Close() }()
+
 	hash := sha256.New()
 	if _, err := io.Copy(hash, getResp.Body); err != nil {
 		return "", err
 	}
-	
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
 
-func (h *BackupHandler) uploadIfChanged(ctx context.Context, key string, data []byte, newChecksum string) (bool, error) {
-	// Try to get existing checksum
-	existingChecksum, err := h.getObjectChecksum(ctx, key)
-	if err != nil {
-		// If object doesn't exist, upload it
-		if strings.Contains(err.Error(), "NotFound") {
-			return true, h.uploadToS3WithChecksum(ctx, key, data, newChecksum)
-		}
-		// For other errors, still try to upload
-		log.Printf("Warning: couldn't get checksum for %s: %v", key, err)
-	}
-	
-	// Compare checksums
-	if existingChecksum == newChecksum {
-		return false, nil // No upload needed
-	}
-	
-	// Upload with checksum
-	return true, h.uploadToS3WithChecksum(ctx, key, data, newChecksum)
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (h *BackupHandler) uploadToS3WithChecksum(ctx context.Context, key string, data []byte, checksum string) error {
@@ -387,16 +366,6 @@ func (h *BackupHandler) uploadToS3WithChecksum(ctx context.Context, key string, 
 		Metadata: map[string]string{
 			"sha256": checksum,
 		},
-	})
-	return err
-}
-
-func (h *BackupHandler) uploadToS3(ctx context.Context, key string, data []byte) error {
-	_, err := h.s3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(h.bucket),
-		Key:         aws.String(key),
-		Body:        bytes.NewReader(data),
-		ContentType: aws.String("application/sql"),
 	})
 	return err
 }
@@ -447,7 +416,7 @@ func (h *BackupHandler) cleanupOldDailyBackups(ctx context.Context) error {
 		if len(parts) != 2 {
 			continue
 		}
-		
+
 		datePart := strings.TrimSuffix(parts[1], "-backup.sql")
 		backupDate, err := time.Parse("2006-01-02", datePart)
 		if err != nil {
