@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GOLANG_VERSION: 1.24.10
+  GOLANG_VERSION: 1.25.9
 
 permissions:
   contents: read
@@ -63,7 +63,7 @@ jobs:
     if: github.event_name == 'push' || needs.check-label.outputs.should-run == 'true'
     strategy:
       matrix:
-        go-version: ["1.24.10"]
+        go-version: ["1.25.9"]
 
     steps:
       - uses: actions/checkout@v4
@@ -97,7 +97,7 @@ jobs:
     if: always() && !cancelled() && (needs.build.result == 'success' && needs.lint.result == 'success')
     strategy:
       matrix:
-        go-version: ["1.24.10"]
+        go-version: ["1.25.9"]
 
     steps:
       - uses: actions/checkout@v4
