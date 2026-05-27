@@ -131,12 +131,17 @@ tasks:
           echo "DATABASE_URL is required (set it in .env or export it)" >&2
           exit 1
         fi
+        if [ -z "${API_KEY:-}" ]; then
+          echo "API_KEY is required (set it in .env or export it)" >&2
+          exit 1
+        fi
         aws cloudformation deploy \
           --template-file {{.CF_PACKAGED_TEMPLATE}} \
           --stack-name {{.STACK_PREFIX}}-{{.STAGE}} \
           --parameter-overrides \
               Stage={{.STAGE}} \
               DatabaseUrl="$DATABASE_URL" \
+              ApiKey="$API_KEY" \
               DailyBackupRetentionDays="${DAILY_BACKUP_RETENTION_DAYS:-7}" \
           --capabilities CAPABILITY_NAMED_IAM \
           --region {{.REGION}} \

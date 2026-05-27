@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -440,13 +443,73 @@ func (h *BackupHandler) cleanupOldDailyBackups(ctx context.Context) error {
 	return nil
 }
 
+// dispatch routes the raw Lambda event to either the HTTP handler (when
+// invoked through the API Gateway /run endpoint) or the scheduled backup
+// handler (EventBridge cron or a direct/manual invoke).
+func (h *BackupHandler) dispatch(ctx context.Context, raw json.RawMessage) (any, error) {
+	var req events.APIGatewayV2HTTPRequest
+	if err := json.Unmarshal(raw, &req); err == nil && req.RequestContext.HTTP.Method != "" {
+		return h.handleHTTP(ctx, req), nil
+	}
+
+	// Scheduled or direct invocation: no HTTP response expected.
+	return nil, h.HandleRequest(ctx)
+}
+
+// handleHTTP authenticates the API Gateway request, runs the backup, and
+// returns an HTTP response. It never returns an error so that auth/backup
+// failures surface as proper HTTP status codes rather than Lambda errors.
+func (h *BackupHandler) handleHTTP(ctx context.Context, req events.APIGatewayV2HTTPRequest) events.APIGatewayV2HTTPResponse {
+	if !authorized(req) {
+		return jsonResponse(401, map[string]string{"error": "unauthorized"})
+	}
+
+	if err := h.HandleRequest(ctx); err != nil {
+		log.Printf("backup failed: %v", err)
+		return jsonResponse(500, map[string]string{"error": "backup failed"})
+	}
+
+	return jsonResponse(200, map[string]string{"status": "ok"})
+}
+
+// authorized checks the request against the API_KEY env var. The key may be
+// supplied via the X-Api-Key header or the api_key query string parameter.
+func authorized(req events.APIGatewayV2HTTPRequest) bool {
+	expected := os.Getenv("API_KEY")
+	if expected == "" {
+		log.Println("API_KEY environment variable not set; rejecting request")
+		return false
+	}
+
+	// API Gateway v2 lower-cases header names.
+	if provided, ok := req.Headers["x-api-key"]; ok && constantTimeEqual(provided, expected) {
+		return true
+	}
+	if provided, ok := req.QueryStringParameters["api_key"]; ok && constantTimeEqual(provided, expected) {
+		return true
+	}
+
+	return false
+}
+
+func constantTimeEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func jsonResponse(status int, body any) events.APIGatewayV2HTTPResponse {
+	b, _ := json.Marshal(body)
+	return events.APIGatewayV2HTTPResponse{
+		StatusCode: status,
+		Headers:    map[string]string{"Content-Type": "application/json"},
+		Body:       string(b),
+	}
+}
+
 func main() {
 	handler, err := NewBackupHandler()
 	if err != nil {
 		log.Fatalf("Failed to initialize handler: %v", err)
 	}
 
-	lambda.Start(func(ctx context.Context) error {
-		return handler.HandleRequest(ctx)
-	})
+	lambda.Start(handler.dispatch)
 }
