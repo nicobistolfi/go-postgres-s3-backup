@@ -6,6 +6,7 @@
 *.dylib
 go-lambda-api
 bootstrap
+lambda
 
 # Test binary, built with `go test -c`
 *.test
