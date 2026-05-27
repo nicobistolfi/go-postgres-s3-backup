@@ -2,6 +2,7 @@
 
 ![Backup Banner](shutdown.jpeg)
 
+[![Mentioned in Awesome Go](https://awesome.re/mentioned-badge.svg)](https://github.com/avelino/awesome-go)
 [![Go Reference](https://pkg.go.dev/badge/github.com/nicobistolfi/go-postgres-s3-backup.svg)](https://pkg.go.dev/github.com/nicobistolfi/go-postgres-s3-backup)
 [![Go Report Card](https://goreportcard.com/badge/github.com/nicobistolfi/go-postgres-s3-backup)](https://goreportcard.com/report/github.com/nicobistolfi/go-postgres-s3-backup)
 [![Build & Test](https://github.com/nicobistolfi/go-postgres-s3-backup/actions/workflows/go.yml/badge.svg)](https://github.com/nicobistolfi/go-postgres-s3-backup/actions/workflows/go.yml)
