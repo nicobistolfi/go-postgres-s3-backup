@@ -2,6 +2,12 @@
 
 ![Backup Banner](shutdown.jpeg)
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/nicobistolfi/go-postgres-s3-backup.svg)](https://pkg.go.dev/github.com/nicobistolfi/go-postgres-s3-backup)
+[![Go Report Card](https://goreportcard.com/badge/github.com/nicobistolfi/go-postgres-s3-backup)](https://goreportcard.com/report/github.com/nicobistolfi/go-postgres-s3-backup)
+[![Build & Test](https://github.com/nicobistolfi/go-postgres-s3-backup/actions/workflows/go.yml/badge.svg)](https://github.com/nicobistolfi/go-postgres-s3-backup/actions/workflows/go.yml)
+[![codecov](https://codecov.io/gh/nicobistolfi/go-postgres-s3-backup/branch/main/graph/badge.svg)](https://codecov.io/gh/nicobistolfi/go-postgres-s3-backup)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A serverless backup solution for PostgreSQL databases using AWS Lambda, with automatic daily, monthly, and yearly backup rotation to S3.
 
 ## Features
@@ -14,28 +20,35 @@ A serverless backup solution for PostgreSQL databases using AWS Lambda, with aut
 - ✅ Yearly backups moved to Deep Archive for long-term retention
 - ✅ Deployed via AWS CloudFormation
 - ✅ S3 bucket encryption and versioning enabled
-- ✅ Uses pgx/v5 for efficient PostgreSQL connectivity
+- ✅ Content-aware deduplication via SHA-256 checksums
+- ✅ Reusable, documented `backup` package with ~90% test coverage
 
 ## Project Structure
 
 ```
 /
+├── backup/                   # Importable, documented backup library
+│   ├── backup.go             #   Handler, Config, Result, Run
+│   ├── store.go              #   S3API interface + storage helpers
+│   ├── dump.go               #   pg_dump invocation
+│   ├── database.go           #   DATABASE_URL parsing
+│   ├── events.go             #   Lambda dispatch + /run HTTP auth
+│   └── size.go               #   human-readable sizes
 ├── cmd/
 │   └── lambda/
-│       └── main.go           # Lambda function entry point
+│       └── main.go           # Lambda entry point (thin wiring)
 ├── cloudformation/
 │   └── template.yml          # CloudFormation stack definition
 ├── postgres-layer/           # Lambda layer with pg_dump/psql
+├── .goreleaser.yml           # Release build configuration
 ├── Taskfile.yml              # Task runner configuration
-├── .env                      # Environment variables (not in repo)
-├── .gitignore                # Git ignore file
 ├── go.mod                    # Go module file
 └── README.md                 # This file
 ```
 
 ## Prerequisites
 
-- Go 1.21+
+- Go 1.24+
 - [Task](https://taskfile.dev)
 - Docker (for building the PostgreSQL layer)
 - AWS CLI configured

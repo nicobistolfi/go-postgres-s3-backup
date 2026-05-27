@@ -1,574 +1,21 @@
+// Command lambda is the AWS Lambda entry point for go-postgres-s3-backup. It
+// wires environment configuration to the backup package and starts the Lambda
+// runtime; all backup logic lives in the importable backup package.
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"io"
 	"log"
-	"net/url"
 	"os"
-	"os/exec"
 	"strconv"
-	"strings"
-	"time"
 
-	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/joho/godotenv"
+
+	"github.com/nicobistolfi/go-postgres-s3-backup/backup"
 )
-
-type BackupHandler struct {
-	s3Client *s3.Client
-	bucket   string
-	dbConfig DatabaseConfig
-}
-
-type DatabaseConfig struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	Database string
-}
-
-// BackupResult summarizes a single backup run for the /run HTTP response.
-type BackupResult struct {
-	Status     string `json:"status"`      // always "ok" on success
-	Action     string `json:"action"`      // "created" or "skipped"
-	Reason     string `json:"reason"`      // why the daily backup was created/skipped
-	Key        string `json:"key"`         // today's daily backup S3 key
-	Size       string `json:"size"`        // human-readable dump size (e.g. "12.34 MB")
-	SizeBytes  int    `json:"size_bytes"`  // size of the dump in bytes
-	DurationMs int64  `json:"duration_ms"` // wall-clock time of the run
-}
-
-// humanizeSize formats a byte count using binary units (KB/MB/GB/...), or
-// plain bytes below 1 KB.
-func humanizeSize(b int) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := int64(b) / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
-func NewBackupHandler() (*BackupHandler, error) {
-	// Load .env file for local development
-	_ = godotenv.Load()
-
-	// Initialize AWS config
-	cfg, err := config.LoadDefaultConfig(context.TODO())
-	if err != nil {
-		return nil, fmt.Errorf("unable to load SDK config: %w", err)
-	}
-
-	// Get environment variables
-	bucket := os.Getenv("BACKUP_BUCKET")
-	if bucket == "" {
-		return nil, fmt.Errorf("BACKUP_BUCKET environment variable not set")
-	}
-
-	dbConnStr := os.Getenv("DATABASE_URL")
-	if dbConnStr == "" {
-		return nil, fmt.Errorf("DATABASE_URL environment variable not set")
-	}
-
-	// Parse database URL
-	dbConfig, err := parseDatabaseURL(dbConnStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse DATABASE_URL: %w", err)
-	}
-
-	return &BackupHandler{
-		s3Client: s3.NewFromConfig(cfg),
-		bucket:   bucket,
-		dbConfig: dbConfig,
-	}, nil
-}
-
-func parseDatabaseURL(dbURL string) (DatabaseConfig, error) {
-	u, err := url.Parse(dbURL)
-	if err != nil {
-		return DatabaseConfig{}, err
-	}
-
-	password, _ := u.User.Password()
-
-	// Default port to 5432 if not specified
-	port := u.Port()
-	if port == "" {
-		port = "5432"
-	}
-
-	// Remove leading slash from path to get database name
-	database := strings.TrimPrefix(u.Path, "/")
-	if database == "" {
-		database = "postgres"
-	}
-
-	return DatabaseConfig{
-		Host:     u.Hostname(),
-		Port:     port,
-		User:     u.User.Username(),
-		Password: password,
-		Database: database,
-	}, nil
-}
-
-// HandleRequest runs a backup and returns a summary of what happened. When
-// force is true (manual /run invocation), the daily backup is always stored
-// even if its content matches the most recent daily backup; otherwise an
-// unchanged backup is skipped.
-func (h *BackupHandler) HandleRequest(ctx context.Context, force bool) (*BackupResult, error) {
-	start := time.Now()
-	log.Println("Starting database backup...")
-
-	// Create backup using pg_dump
-	backupData, err := h.createBackup(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create backup: %w", err)
-	}
-
-	// Get current date
-	now := time.Now()
-	year := now.Format("2006")
-	month := now.Format("2006-01")
-	day := now.Format("2006-01-02")
-
-	// Calculate checksum of the new backup
-	newChecksum := h.calculateChecksum(backupData)
-
-	// Find the most recent daily backup to compare against
-	mostRecentBackup, err := h.findMostRecentBackup(ctx, "daily/")
-	if err != nil {
-		log.Printf("Warning: couldn't find most recent backup: %v", err)
-	}
-
-	// Check if content has changed from the most recent backup
-	contentChanged := true
-	if mostRecentBackup != "" {
-		existingChecksum, err := h.getObjectChecksum(ctx, mostRecentBackup)
-		if err == nil && existingChecksum == newChecksum {
-			contentChanged = false
-		}
-	}
-
-	dailyKey := fmt.Sprintf("daily/%s-backup.sql", day)
-	result := &BackupResult{
-		Status:    "ok",
-		Key:       dailyKey,
-		Size:      humanizeSize(len(backupData)),
-		SizeBytes: len(backupData),
-	}
-
-	// Decide whether to write today's daily backup. A normal run stores it
-	// only when the dump differs from the most recent daily backup. A forced
-	// (manual) run stores it even when it matches an older backup, but still
-	// won't rewrite today's file when that file is already identical.
-	uploadDaily := contentChanged
-	result.Reason = "content changed"
-	if !contentChanged {
-		switch {
-		case !force:
-			result.Reason = "unchanged"
-		case h.objectMatches(ctx, dailyKey, newChecksum):
-			result.Reason = "today's backup already identical"
-		default:
-			uploadDaily = true
-			result.Reason = "forced; matched an older backup"
-		}
-	}
-
-	if !uploadDaily {
-		log.Printf("Skipping daily backup upload: %s", result.Reason)
-		result.Action = "skipped"
-		result.DurationMs = time.Since(start).Milliseconds()
-		return result, nil
-	}
-
-	if err := h.uploadToS3WithChecksum(ctx, dailyKey, backupData, newChecksum); err != nil {
-		return nil, fmt.Errorf("failed to upload daily backup: %w", err)
-	}
-	log.Printf("Daily backup uploaded: %s", dailyKey)
-	result.Action = "created"
-
-	// Create monthly/yearly backups if they don't exist yet.
-	// Check and create monthly backup if needed
-	monthlyKey := fmt.Sprintf("monthly/%s-backup.sql", month)
-	if exists, err := h.objectExists(ctx, monthlyKey); err != nil {
-		return nil, fmt.Errorf("failed to check monthly backup: %w", err)
-	} else if !exists {
-		if err := h.uploadToS3WithChecksum(ctx, monthlyKey, backupData, newChecksum); err != nil {
-			return nil, fmt.Errorf("failed to upload monthly backup: %w", err)
-		}
-		log.Printf("Monthly backup created: %s", monthlyKey)
-	}
-
-	// Check and create yearly backup if needed
-	yearlyKey := fmt.Sprintf("yearly/%s-backup.sql", year)
-	if exists, err := h.objectExists(ctx, yearlyKey); err != nil {
-		return nil, fmt.Errorf("failed to check yearly backup: %w", err)
-	} else if !exists {
-		if err := h.uploadToS3WithChecksum(ctx, yearlyKey, backupData, newChecksum); err != nil {
-			return nil, fmt.Errorf("failed to upload yearly backup: %w", err)
-		}
-		log.Printf("Yearly backup created: %s", yearlyKey)
-	}
-
-	// Clean up old daily backups (retention period from DAILY_BACKUP_RETENTION_DAYS env var, default 7 days)
-	if err := h.cleanupOldDailyBackups(ctx); err != nil {
-		log.Printf("Warning: failed to clean up old daily backups: %v", err)
-	}
-
-	log.Println("Backup process completed successfully")
-	result.DurationMs = time.Since(start).Milliseconds()
-	return result, nil
-}
-
-// objectMatches reports whether the object at key exists and its checksum
-// equals the given checksum.
-func (h *BackupHandler) objectMatches(ctx context.Context, key, checksum string) bool {
-	existing, err := h.getObjectChecksum(ctx, key)
-	return err == nil && existing == checksum
-}
-
-func (h *BackupHandler) createBackup(ctx context.Context) ([]byte, error) {
-	// Debug: Log current environment
-	log.Printf("Current PATH: %s", os.Getenv("PATH"))
-	log.Printf("Current LD_LIBRARY_PATH: %s", os.Getenv("LD_LIBRARY_PATH"))
-
-	// Set PATH to include layer binaries (note: layer creates /opt/opt/bin structure)
-	_ = os.Setenv("PATH", "/opt/opt/bin:"+os.Getenv("PATH"))
-
-	// Set library path for shared libraries
-	_ = os.Setenv("LD_LIBRARY_PATH", "/opt/opt/lib:"+os.Getenv("LD_LIBRARY_PATH"))
-
-	// Debug: Log updated environment
-	log.Printf("Updated PATH: %s", os.Getenv("PATH"))
-	log.Printf("Updated LD_LIBRARY_PATH: %s", os.Getenv("LD_LIBRARY_PATH"))
-
-	// Debug: Check what's in /opt
-	if entries, err := os.ReadDir("/opt"); err == nil {
-		log.Printf("Contents of /opt: %v", entries)
-		for _, entry := range entries {
-			if entry.IsDir() {
-				if subEntries, subErr := os.ReadDir("/opt/" + entry.Name()); subErr == nil {
-					log.Printf("Contents of /opt/%s: %v", entry.Name(), subEntries)
-				}
-			}
-		}
-	} else {
-		log.Printf("Error reading /opt directory: %v", err)
-	}
-
-	// Set PostgreSQL password via environment
-	_ = os.Setenv("PGPASSWORD", h.dbConfig.Password)
-
-	// Check if pg_dump binary exists
-	pgDumpPath := "/opt/opt/bin/pg_dump"
-	if _, err := os.Stat(pgDumpPath); os.IsNotExist(err) {
-		// Try to find it in PATH
-		var lookupErr error
-		pgDumpPath, lookupErr = exec.LookPath("pg_dump")
-		if lookupErr != nil {
-			return nil, fmt.Errorf("pg_dump binary not found in /opt/opt/bin or PATH: %w", lookupErr)
-		}
-	}
-
-	log.Printf("Using pg_dump at: %s", pgDumpPath)
-
-	// Build pg_dump command with full path
-	// Note: PostgreSQL 14 supports SCRAM auth and modern options
-	cmd := exec.CommandContext(ctx, pgDumpPath,
-		"-h", h.dbConfig.Host,
-		"-p", h.dbConfig.Port,
-		"-U", h.dbConfig.User,
-		"-d", h.dbConfig.Database,
-		"--verbose",
-		"--no-owner",
-		"--no-privileges",
-		"--clean",
-		"--if-exists",
-		"--exclude-schema=supabase_migrations",
-		"--no-comments",
-	)
-
-	// Capture output
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	// Run pg_dump
-	log.Println("Executing pg_dump...")
-	err := cmd.Run()
-
-	// Log stderr (pg_dump writes progress info to stderr)
-	if stderr.Len() > 0 {
-		log.Printf("pg_dump stderr: %s", stderr.String())
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("pg_dump failed: %w\nstderr: %s", err, stderr.String())
-	}
-
-	backupData := stdout.Bytes()
-
-	// Remove timestamp comments that cause unnecessary duplicates
-	backupData = h.removeTimestampComments(backupData)
-
-	log.Printf("Backup created successfully, size: %d bytes", len(backupData))
-
-	return backupData, nil
-}
-
-func (h *BackupHandler) removeTimestampComments(data []byte) []byte {
-	lines := bytes.Split(data, []byte("\n"))
-	var filtered [][]byte
-
-	for _, line := range lines {
-		// Skip lines that start with "-- Started on" or "-- Completed on"
-		if bytes.HasPrefix(line, []byte("-- Started on ")) ||
-			bytes.HasPrefix(line, []byte("-- Completed on ")) {
-			continue
-		}
-		filtered = append(filtered, line)
-	}
-
-	return bytes.Join(filtered, []byte("\n"))
-}
-
-func (h *BackupHandler) findMostRecentBackup(ctx context.Context, prefix string) (string, error) {
-	resp, err := h.s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(h.bucket),
-		Prefix: aws.String(prefix),
-	})
-	if err != nil {
-		return "", err
-	}
-
-	if len(resp.Contents) == 0 {
-		return "", nil
-	}
-
-	// Find the most recent backup by LastModified time
-	var mostRecent types.Object
-	var found bool
-	for _, obj := range resp.Contents {
-		if !found || obj.LastModified.After(*mostRecent.LastModified) {
-			mostRecent = obj
-			found = true
-		}
-	}
-
-	if found {
-		return *mostRecent.Key, nil
-	}
-
-	return "", nil
-}
-
-func (h *BackupHandler) calculateChecksum(data []byte) string {
-	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])
-}
-
-func (h *BackupHandler) getObjectChecksum(ctx context.Context, key string) (string, error) {
-	// Try to get checksum from object metadata
-	resp, err := h.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(h.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return "", err
-	}
-
-	// Check if we stored the checksum in metadata
-	if resp.Metadata != nil {
-		if checksum, ok := resp.Metadata["sha256"]; ok {
-			return checksum, nil
-		}
-	}
-
-	// If no checksum in metadata, we need to download and calculate
-	// This is for backwards compatibility with existing backups
-	getResp, err := h.s3Client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(h.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = getResp.Body.Close() }()
-
-	hash := sha256.New()
-	if _, err := io.Copy(hash, getResp.Body); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func (h *BackupHandler) uploadToS3WithChecksum(ctx context.Context, key string, data []byte, checksum string) error {
-	_, err := h.s3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(h.bucket),
-		Key:         aws.String(key),
-		Body:        bytes.NewReader(data),
-		ContentType: aws.String("application/sql"),
-		Metadata: map[string]string{
-			"sha256": checksum,
-		},
-	})
-	return err
-}
-
-func (h *BackupHandler) objectExists(ctx context.Context, key string) (bool, error) {
-	_, err := h.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(h.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		// Check if it's a "not found" error
-		if strings.Contains(err.Error(), "NotFound") {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-func (h *BackupHandler) cleanupOldDailyBackups(ctx context.Context) error {
-	// List all daily backups
-	resp, err := h.s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(h.bucket),
-		Prefix: aws.String("daily/"),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to list daily backups: %w", err)
-	}
-
-	// Get retention days from environment variable, default to 7
-	retentionDays := 7
-	if retentionEnv := os.Getenv("DAILY_BACKUP_RETENTION_DAYS"); retentionEnv != "" {
-		if parsed, err := strconv.Atoi(retentionEnv); err == nil && parsed > 0 {
-			retentionDays = parsed
-			log.Printf("Using custom retention period: %d days", retentionDays)
-		} else {
-			log.Printf("Warning: Invalid DAILY_BACKUP_RETENTION_DAYS value '%s', using default 7 days", retentionEnv)
-		}
-	}
-
-	// Calculate cutoff date based on retention days
-	cutoff := time.Now().AddDate(0, 0, -retentionDays)
-
-	// Delete old backups
-	for _, obj := range resp.Contents {
-		// Extract date from key (format: daily/YYYY-MM-DD-backup.sql)
-		parts := strings.Split(*obj.Key, "/")
-		if len(parts) != 2 {
-			continue
-		}
-
-		datePart := strings.TrimSuffix(parts[1], "-backup.sql")
-		backupDate, err := time.Parse("2006-01-02", datePart)
-		if err != nil {
-			log.Printf("Warning: failed to parse date from key %s: %v", *obj.Key, err)
-			continue
-		}
-
-		if backupDate.Before(cutoff) {
-			_, err := h.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
-				Bucket: aws.String(h.bucket),
-				Key:    obj.Key,
-			})
-			if err != nil {
-				log.Printf("Warning: failed to delete old backup %s: %v", *obj.Key, err)
-			} else {
-				log.Printf("Deleted old daily backup: %s", *obj.Key)
-			}
-		}
-	}
-
-	return nil
-}
-
-// dispatch routes the raw Lambda event to either the HTTP handler (when
-// invoked through the API Gateway /run endpoint) or the scheduled backup
-// handler (EventBridge cron or a direct/manual invoke).
-func (h *BackupHandler) dispatch(ctx context.Context, raw json.RawMessage) (any, error) {
-	var req events.APIGatewayV2HTTPRequest
-	if err := json.Unmarshal(raw, &req); err == nil && req.RequestContext.HTTP.Method != "" {
-		return h.handleHTTP(ctx, req), nil
-	}
-
-	// Scheduled or direct invocation: no HTTP response expected, dedupe applies.
-	_, err := h.HandleRequest(ctx, false)
-	return nil, err
-}
-
-// handleHTTP authenticates the API Gateway request, runs the backup, and
-// returns an HTTP response. It never returns an error so that auth/backup
-// failures surface as proper HTTP status codes rather than Lambda errors.
-func (h *BackupHandler) handleHTTP(ctx context.Context, req events.APIGatewayV2HTTPRequest) events.APIGatewayV2HTTPResponse {
-	if !authorized(req) {
-		return jsonResponse(401, map[string]string{"error": "unauthorized"})
-	}
-
-	// Manual runs always store a daily backup, even if content is unchanged.
-	result, err := h.HandleRequest(ctx, true)
-	if err != nil {
-		log.Printf("backup failed: %v", err)
-		return jsonResponse(500, map[string]string{"status": "error", "error": err.Error()})
-	}
-
-	return jsonResponse(200, result)
-}
-
-// authorized checks the request against the API_KEY env var. The key may be
-// supplied via the X-Api-Key header or the api_key query string parameter.
-func authorized(req events.APIGatewayV2HTTPRequest) bool {
-	expected := os.Getenv("API_KEY")
-	if expected == "" {
-		log.Println("API_KEY environment variable not set; rejecting request")
-		return false
-	}
-
-	// API Gateway v2 lower-cases header names.
-	if provided, ok := req.Headers["x-api-key"]; ok && constantTimeEqual(provided, expected) {
-		return true
-	}
-	if provided, ok := req.QueryStringParameters["api_key"]; ok && constantTimeEqual(provided, expected) {
-		return true
-	}
-
-	return false
-}
-
-func constantTimeEqual(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-}
-
-func jsonResponse(status int, body any) events.APIGatewayV2HTTPResponse {
-	b, _ := json.Marshal(body)
-	return events.APIGatewayV2HTTPResponse{
-		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "application/json"},
-		Body:       string(b),
-	}
-}
 
 // Build information, set via -ldflags at release time by GoReleaser.
 var (
@@ -580,10 +27,49 @@ var (
 func main() {
 	log.Printf("go-postgres-s3-backup %s (commit %s, built %s)", version, commit, date)
 
-	handler, err := NewBackupHandler()
+	// Load .env for local development.
+	_ = godotenv.Load()
+
+	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
-		log.Fatalf("Failed to initialize handler: %v", err)
+		log.Fatalf("unable to load SDK config: %v", err)
 	}
 
-	lambda.Start(handler.dispatch)
+	bucket := os.Getenv("BACKUP_BUCKET")
+	if bucket == "" {
+		log.Fatalf("BACKUP_BUCKET environment variable not set")
+	}
+
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		log.Fatalf("DATABASE_URL environment variable not set")
+	}
+	db, err := backup.ParseDatabaseURL(dbURL)
+	if err != nil {
+		log.Fatalf("failed to parse DATABASE_URL: %v", err)
+	}
+
+	handler := backup.New(backup.Config{
+		S3:            s3.NewFromConfig(cfg),
+		Bucket:        bucket,
+		Database:      db,
+		RetentionDays: retentionDays(),
+	})
+
+	events := backup.NewEventHandler(handler, os.Getenv("API_KEY"))
+	lambda.Start(events.Dispatch)
+}
+
+// retentionDays reads DAILY_BACKUP_RETENTION_DAYS, defaulting to 7 when unset
+// or invalid.
+func retentionDays() int {
+	v := os.Getenv("DAILY_BACKUP_RETENTION_DAYS")
+	if v == "" {
+		return 7
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return n
+	}
+	log.Printf("Warning: invalid DAILY_BACKUP_RETENTION_DAYS value %q, using default 7", v)
+	return 7
 }
