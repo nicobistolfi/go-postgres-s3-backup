@@ -136,24 +136,33 @@ func (h *BackupHandler) HandleRequest(ctx context.Context, force bool) error {
 		existingChecksum, err := h.getObjectChecksum(ctx, mostRecentBackup)
 		if err == nil && existingChecksum == newChecksum {
 			contentChanged = false
-			if force {
-				log.Printf("Backup content unchanged from %s, but force is set; storing daily backup anyway", mostRecentBackup)
-			} else {
+			if !force {
 				log.Printf("Backup content unchanged from %s, skipping all uploads", mostRecentBackup)
 			}
 		}
 	}
 
-	// Upload the daily backup when content changed, or always for a forced
-	// (manual) run.
+	// Decide whether to write today's daily backup. A normal run stores it
+	// only when the dump differs from the most recent daily backup. A forced
+	// (manual) run stores it even when it matches an older backup, but still
+	// won't rewrite today's file when that file is already identical.
 	dailyKey := fmt.Sprintf("daily/%s-backup.sql", day)
-	if contentChanged || force {
+	uploadDaily := contentChanged
+	if force && !uploadDaily {
+		if existing, err := h.getObjectChecksum(ctx, dailyKey); err == nil && existing == newChecksum {
+			log.Printf("Forced run, but today's daily backup %s is already identical; skipping overwrite", dailyKey)
+		} else {
+			uploadDaily = true
+		}
+	}
+
+	if uploadDaily {
 		if err := h.uploadToS3WithChecksum(ctx, dailyKey, backupData, newChecksum); err != nil {
 			return fmt.Errorf("failed to upload daily backup: %w", err)
 		}
 		log.Printf("Daily backup uploaded: %s", dailyKey)
 	} else {
-		// Content unchanged and not forced: nothing to do.
+		// Nothing to store.
 		return nil
 	}
 
