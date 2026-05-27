@@ -191,7 +191,7 @@ jobs:
     name: Quality Check Summary
     runs-on: ubuntu-latest
     needs: [check-label, build, test, lint, vulnerability-check]
-    if: always() && github.event_name == 'pull_request' && needs.check-label.outputs.should-run == 'true'
+    if: always() && !cancelled() && github.event_name == 'pull_request' && needs.check-label.outputs.should-run == 'true'
     steps:
       - name: Post Quality Check Results
         uses: actions/github-script@v7
@@ -206,7 +206,7 @@ jobs:
             // Find all bot comments with the quality check header
             const botComments = comments.filter(comment =>
               comment.user.type === 'Bot' &&
-              comment.body.includes('## 💎 Quality Check')
+              comment.body.includes('## 💎 Go PostgreSQL S3 Backup Quality Check')
             );
 
             // Delete all previous quality check comments
@@ -229,13 +229,15 @@ jobs:
 
             const requiredChecks = [buildStatus, testStatus, lintStatus, vulnStatus];
 
-            if (requiredChecks.some(status => status !== 'success')) {
+            // Only treat an actual 'failure' as a failed check; cancelled or
+            // skipped jobs should not produce a failure card.
+            if (requiredChecks.some(status => status === 'failure')) {
               statusEmoji = '❌';
               statusText = 'Some quality checks failed.';
             }
 
 
-            const body = `## 💎 Environment Manager Quality Check
+            const body = `## 💎 Go PostgreSQL S3 Backup Quality Check
 
             ${statusEmoji} **Status**: ${statusText}
 
