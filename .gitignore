@@ -6,7 +6,8 @@
 *.dylib
 go-lambda-api
 bootstrap
-lambda
+# root-level lambda build binary (anchored so it doesn't match cmd/lambda/)
+/lambda
 
 # Test binary, built with `go test -c`
 *.test

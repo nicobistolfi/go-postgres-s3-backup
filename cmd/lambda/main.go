@@ -40,6 +40,16 @@ type DatabaseConfig struct {
 	Database string
 }
 
+// BackupResult summarizes a single backup run for the /run HTTP response.
+type BackupResult struct {
+	Status     string `json:"status"`      // always "ok" on success
+	Action     string `json:"action"`      // "created" or "skipped"
+	Reason     string `json:"reason"`      // why the daily backup was created/skipped
+	Key        string `json:"key"`         // today's daily backup S3 key
+	SizeBytes  int    `json:"size_bytes"`  // size of the dump in bytes
+	DurationMs int64  `json:"duration_ms"` // wall-clock time of the run
+}
+
 func NewBackupHandler() (*BackupHandler, error) {
 	// Load .env file for local development
 	_ = godotenv.Load()
@@ -103,16 +113,18 @@ func parseDatabaseURL(dbURL string) (DatabaseConfig, error) {
 	}, nil
 }
 
-// HandleRequest runs a backup. When force is true (manual /run invocation),
-// the daily backup is always stored even if its content matches the most
-// recent daily backup; otherwise an unchanged backup is skipped.
-func (h *BackupHandler) HandleRequest(ctx context.Context, force bool) error {
+// HandleRequest runs a backup and returns a summary of what happened. When
+// force is true (manual /run invocation), the daily backup is always stored
+// even if its content matches the most recent daily backup; otherwise an
+// unchanged backup is skipped.
+func (h *BackupHandler) HandleRequest(ctx context.Context, force bool) (*BackupResult, error) {
+	start := time.Now()
 	log.Println("Starting database backup...")
 
 	// Create backup using pg_dump
 	backupData, err := h.createBackup(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to create backup: %w", err)
+		return nil, fmt.Errorf("failed to create backup: %w", err)
 	}
 
 	// Get current date
@@ -136,44 +148,55 @@ func (h *BackupHandler) HandleRequest(ctx context.Context, force bool) error {
 		existingChecksum, err := h.getObjectChecksum(ctx, mostRecentBackup)
 		if err == nil && existingChecksum == newChecksum {
 			contentChanged = false
-			if !force {
-				log.Printf("Backup content unchanged from %s, skipping all uploads", mostRecentBackup)
-			}
 		}
+	}
+
+	dailyKey := fmt.Sprintf("daily/%s-backup.sql", day)
+	result := &BackupResult{
+		Status:    "ok",
+		Key:       dailyKey,
+		SizeBytes: len(backupData),
 	}
 
 	// Decide whether to write today's daily backup. A normal run stores it
 	// only when the dump differs from the most recent daily backup. A forced
 	// (manual) run stores it even when it matches an older backup, but still
 	// won't rewrite today's file when that file is already identical.
-	dailyKey := fmt.Sprintf("daily/%s-backup.sql", day)
 	uploadDaily := contentChanged
-	if force && !uploadDaily {
-		if existing, err := h.getObjectChecksum(ctx, dailyKey); err == nil && existing == newChecksum {
-			log.Printf("Forced run, but today's daily backup %s is already identical; skipping overwrite", dailyKey)
-		} else {
+	result.Reason = "content changed"
+	if !contentChanged {
+		switch {
+		case !force:
+			result.Reason = "unchanged"
+		case h.objectMatches(ctx, dailyKey, newChecksum):
+			result.Reason = "today's backup already identical"
+		default:
 			uploadDaily = true
+			result.Reason = "forced; matched an older backup"
 		}
 	}
 
-	if uploadDaily {
-		if err := h.uploadToS3WithChecksum(ctx, dailyKey, backupData, newChecksum); err != nil {
-			return fmt.Errorf("failed to upload daily backup: %w", err)
-		}
-		log.Printf("Daily backup uploaded: %s", dailyKey)
-	} else {
-		// Nothing to store.
-		return nil
+	if !uploadDaily {
+		log.Printf("Skipping daily backup upload: %s", result.Reason)
+		result.Action = "skipped"
+		result.DurationMs = time.Since(start).Milliseconds()
+		return result, nil
 	}
+
+	if err := h.uploadToS3WithChecksum(ctx, dailyKey, backupData, newChecksum); err != nil {
+		return nil, fmt.Errorf("failed to upload daily backup: %w", err)
+	}
+	log.Printf("Daily backup uploaded: %s", dailyKey)
+	result.Action = "created"
 
 	// Create monthly/yearly backups if they don't exist yet.
 	// Check and create monthly backup if needed
 	monthlyKey := fmt.Sprintf("monthly/%s-backup.sql", month)
 	if exists, err := h.objectExists(ctx, monthlyKey); err != nil {
-		return fmt.Errorf("failed to check monthly backup: %w", err)
+		return nil, fmt.Errorf("failed to check monthly backup: %w", err)
 	} else if !exists {
 		if err := h.uploadToS3WithChecksum(ctx, monthlyKey, backupData, newChecksum); err != nil {
-			return fmt.Errorf("failed to upload monthly backup: %w", err)
+			return nil, fmt.Errorf("failed to upload monthly backup: %w", err)
 		}
 		log.Printf("Monthly backup created: %s", monthlyKey)
 	}
@@ -181,10 +204,10 @@ func (h *BackupHandler) HandleRequest(ctx context.Context, force bool) error {
 	// Check and create yearly backup if needed
 	yearlyKey := fmt.Sprintf("yearly/%s-backup.sql", year)
 	if exists, err := h.objectExists(ctx, yearlyKey); err != nil {
-		return fmt.Errorf("failed to check yearly backup: %w", err)
+		return nil, fmt.Errorf("failed to check yearly backup: %w", err)
 	} else if !exists {
 		if err := h.uploadToS3WithChecksum(ctx, yearlyKey, backupData, newChecksum); err != nil {
-			return fmt.Errorf("failed to upload yearly backup: %w", err)
+			return nil, fmt.Errorf("failed to upload yearly backup: %w", err)
 		}
 		log.Printf("Yearly backup created: %s", yearlyKey)
 	}
@@ -195,7 +218,15 @@ func (h *BackupHandler) HandleRequest(ctx context.Context, force bool) error {
 	}
 
 	log.Println("Backup process completed successfully")
-	return nil
+	result.DurationMs = time.Since(start).Milliseconds()
+	return result, nil
+}
+
+// objectMatches reports whether the object at key exists and its checksum
+// equals the given checksum.
+func (h *BackupHandler) objectMatches(ctx context.Context, key, checksum string) bool {
+	existing, err := h.getObjectChecksum(ctx, key)
+	return err == nil && existing == checksum
 }
 
 func (h *BackupHandler) createBackup(ctx context.Context) ([]byte, error) {
@@ -467,7 +498,8 @@ func (h *BackupHandler) dispatch(ctx context.Context, raw json.RawMessage) (any,
 	}
 
 	// Scheduled or direct invocation: no HTTP response expected, dedupe applies.
-	return nil, h.HandleRequest(ctx, false)
+	_, err := h.HandleRequest(ctx, false)
+	return nil, err
 }
 
 // handleHTTP authenticates the API Gateway request, runs the backup, and
@@ -479,12 +511,13 @@ func (h *BackupHandler) handleHTTP(ctx context.Context, req events.APIGatewayV2H
 	}
 
 	// Manual runs always store a daily backup, even if content is unchanged.
-	if err := h.HandleRequest(ctx, true); err != nil {
+	result, err := h.HandleRequest(ctx, true)
+	if err != nil {
 		log.Printf("backup failed: %v", err)
-		return jsonResponse(500, map[string]string{"error": "backup failed"})
+		return jsonResponse(500, map[string]string{"status": "error", "error": err.Error()})
 	}
 
-	return jsonResponse(200, map[string]string{"status": "ok"})
+	return jsonResponse(200, result)
 }
 
 // authorized checks the request against the API_KEY env var. The key may be
