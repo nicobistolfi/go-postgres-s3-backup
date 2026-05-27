@@ -570,7 +570,16 @@ func jsonResponse(status int, body any) events.APIGatewayV2HTTPResponse {
 	}
 }
 
+// Build information, set via -ldflags at release time by GoReleaser.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
+	log.Printf("go-postgres-s3-backup %s (commit %s, built %s)", version, commit, date)
+
 	handler, err := NewBackupHandler()
 	if err != nil {
 		log.Fatalf("Failed to initialize handler: %v", err)
