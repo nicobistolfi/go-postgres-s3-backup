@@ -46,8 +46,24 @@ type BackupResult struct {
 	Action     string `json:"action"`      // "created" or "skipped"
 	Reason     string `json:"reason"`      // why the daily backup was created/skipped
 	Key        string `json:"key"`         // today's daily backup S3 key
+	Size       string `json:"size"`        // human-readable dump size (e.g. "12.34 MB")
 	SizeBytes  int    `json:"size_bytes"`  // size of the dump in bytes
 	DurationMs int64  `json:"duration_ms"` // wall-clock time of the run
+}
+
+// humanizeSize formats a byte count using binary units (KB/MB/GB/...), or
+// plain bytes below 1 KB.
+func humanizeSize(b int) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := int64(b) / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 func NewBackupHandler() (*BackupHandler, error) {
@@ -155,6 +171,7 @@ func (h *BackupHandler) HandleRequest(ctx context.Context, force bool) (*BackupR
 	result := &BackupResult{
 		Status:    "ok",
 		Key:       dailyKey,
+		Size:      humanizeSize(len(backupData)),
 		SizeBytes: len(backupData),
 	}
 
