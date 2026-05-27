@@ -7,6 +7,7 @@ A serverless backup solution for PostgreSQL databases using AWS Lambda, with aut
 ## Features
 
 - ✅ Automated daily backups of your PostgreSQL database
+- ✅ On-demand backups via an authenticated HTTP endpoint (`GET /run`)
 - ✅ Intelligent backup rotation (daily, monthly, yearly)
 - ✅ Daily backups retained for configurable period (default 7 days)
 - ✅ Monthly backups automatically transitioned to Glacier storage
@@ -47,10 +48,14 @@ git clone https://github.com/nicobistolfi/go-postgres-s3-backup.git
 cd go-postgres-s3-backup
 ```
 
-2. **Configure database**
+2. **Configure environment**
 ```bash
-echo "DATABASE_URL=postgresql://user:pass@host:5432/dbname" > .env
+cat > .env <<'ENV'
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+API_KEY=change-me-to-a-long-random-secret
+ENV
 ```
+`DATABASE_URL` and `API_KEY` are both required to deploy. See [Environment Variables](#environment-variables) for the full list.
 
 3. **Deploy**
 ```bash
@@ -70,6 +75,8 @@ That's it! Your PostgreSQL database will be backed up daily at 2 AM UTC.
 7. **Lifecycle Management**: 
    - Monthly backups transition to Glacier after 30 days
    - Yearly backups transition to Deep Archive after 90 days
+
+Besides the daily schedule, you can trigger a backup on demand through the authenticated [`/run` HTTP endpoint](#trigger-a-backup-over-http). A manual run always stores today's daily backup (even if the dump matches an older backup), unless today's backup already holds identical content.
 
 ## Screenshots
 
@@ -97,6 +104,50 @@ task cf:remove
 ```
 
 > The S3 backup bucket is retained on stack removal. Delete it manually if you no longer need the backups.
+
+### Trigger a backup over HTTP
+
+Deploying creates an HTTP API (API Gateway v2) with a single authenticated route:
+
+```
+GET /run
+```
+
+The endpoint URL is printed as the `RunEndpoint` stack output after `task deploy`. Authenticate with your `API_KEY`, supplied either as a header or a query parameter:
+
+```bash
+# As a header
+curl -H "X-Api-Key: $API_KEY" "$RUN_ENDPOINT"
+
+# As a query parameter
+curl "$RUN_ENDPOINT?api_key=$API_KEY"
+```
+
+Unlike the scheduled run, a manual `/run` always stores today's daily backup even when the dump matches an older backup — except when today's backup already holds identical content, which is skipped to avoid a redundant copy.
+
+On success it returns `200` with a JSON summary of the run:
+
+```json
+{
+  "status": "ok",
+  "action": "created",
+  "reason": "content changed",
+  "key": "daily/2026-05-27-backup.sql",
+  "size": "1.50 MB",
+  "size_bytes": 1572864,
+  "duration_ms": 4231
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `action` | `created` if a daily backup was written, `skipped` if nothing was stored |
+| `reason` | Why the backup was created/skipped: `content changed`, `unchanged`, `today's backup already identical`, or `forced; matched an older backup` |
+| `key` | S3 key of today's daily backup |
+| `size` / `size_bytes` | Dump size — human-readable (KB/MB/GB) and exact byte count, so you can spot size changes between runs |
+| `duration_ms` | Wall-clock time of the run |
+
+A missing or invalid key returns `401`; a backup failure returns `500` with an `error` message.
 
 ## Monitoring
 
@@ -133,11 +184,30 @@ docker exec -it my-postgres psql -U postgres
 
 ## Environment Variables
 
-| Variable | Description | Required | Default |
-|----------|-------------|----------|----------|
-| `DATABASE_URL` | PostgreSQL connection string | Yes | - |
-| `BACKUP_BUCKET` | S3 bucket name (auto-configured by CloudFormation) | Auto | - |
-| `DAILY_BACKUP_RETENTION_DAYS` | Number of days to retain daily backups | No | 7 |
+Configuration lives in a `.env` file in the project root. `Task` loads it for the deploy/local commands, `task deploy` forwards the relevant values into the deployed Lambda as CloudFormation parameters, and the Lambda also reads `.env` directly when run locally (`task run`).
+
+| Variable | Description & why | Required | Default |
+|----------|------------------|----------|---------|
+| `DATABASE_URL` | PostgreSQL connection string (`postgresql://user:pass@host:5432/dbname`). This is the database `pg_dump` connects to — the core input of every backup. | Yes | - |
+| `API_KEY` | Secret that protects the `/run` HTTP endpoint. Callers must present it via the `X-Api-Key` header or `api_key` query parameter; the Lambda compares it in constant time. Use a long random string. | Yes | - |
+| `DAILY_BACKUP_RETENTION_DAYS` | How many days of `daily/` backups to keep. Older daily objects are pruned after each successful run, keeping storage (and cost) bounded. | No | 7 |
+| `STAGE` | Deployment stage used as a suffix for the stack and resource names (e.g. `dev`, `prod`). Lets you run isolated deployments side by side. | No | dev |
+| `REGION` | AWS region to deploy into and operate against. | No | us-west-1 |
+| `ARTIFACT_BUCKET` | S3 bucket that holds the packaged Lambda/layer zip during `task deploy`. Created automatically if it doesn't exist; override only if you want a specific bucket. | No | `go-postgres-s3-backup-artifacts-<account>-<region>` |
+| `BACKUP_BUCKET` | S3 bucket that stores the backups. Auto-configured by CloudFormation inside the deployed Lambda — you only need to set this in `.env` for local runs (`task run`). | Auto | - |
+
+### Example `.env`
+
+```bash
+# Required
+DATABASE_URL=postgresql://user:pass@db-host:5432/mydb
+API_KEY=change-me-to-a-long-random-secret
+
+# Optional (defaults shown)
+DAILY_BACKUP_RETENTION_DAYS=7
+STAGE=dev
+REGION=us-west-1
+```
 
 ## Security
 
