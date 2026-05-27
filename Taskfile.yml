@@ -99,7 +99,8 @@ tasks:
     dotenv: ['.env']
     deps: [build:lambda]
     vars:
-      STAGE: '{{.STAGE | default "dev"}}'
+      STAGE:
+        sh: 'if [ -z "${STAGE-}" ] && [ -f .env ]; then set -a && . ./.env && set +a; fi; echo "${STAGE:-dev}"'
       REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - zip -j {{.LAMBDA_ZIP}} {{.LAMBDA_BINARY}}
@@ -121,7 +122,8 @@ tasks:
     dotenv: ['.env']
     deps: [cf:package]
     vars:
-      STAGE: '{{.STAGE | default "dev"}}'
+      STAGE:
+        sh: 'if [ -z "${STAGE-}" ] && [ -f .env ]; then set -a && . ./.env && set +a; fi; echo "${STAGE:-dev}"'
       REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - |
@@ -145,7 +147,8 @@ tasks:
     desc: Delete the CloudFormation stack (backup bucket is retained)
     dotenv: ['.env']
     vars:
-      STAGE: '{{.STAGE | default "dev"}}'
+      STAGE:
+        sh: 'if [ -z "${STAGE-}" ] && [ -f .env ]; then set -a && . ./.env && set +a; fi; echo "${STAGE:-dev}"'
       REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - aws cloudformation delete-stack --stack-name {{.STACK_PREFIX}}-{{.STAGE}} --region {{.REGION}}
@@ -156,7 +159,8 @@ tasks:
     desc: Tail CloudWatch logs for the Lambda
     dotenv: ['.env']
     vars:
-      STAGE: '{{.STAGE | default "dev"}}'
+      STAGE:
+        sh: 'if [ -z "${STAGE-}" ] && [ -f .env ]; then set -a && . ./.env && set +a; fi; echo "${STAGE:-dev}"'
       REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - aws logs tail /aws/lambda/{{.STACK_PREFIX}}-{{.STAGE}} --follow --region {{.REGION}}
@@ -165,7 +169,8 @@ tasks:
     desc: Manually invoke the backup Lambda
     dotenv: ['.env']
     vars:
-      STAGE: '{{.STAGE | default "dev"}}'
+      STAGE:
+        sh: 'if [ -z "${STAGE-}" ] && [ -f .env ]; then set -a && . ./.env && set +a; fi; echo "${STAGE:-dev}"'
       REGION: '{{.REGION | default "us-west-1"}}'
     cmds:
       - aws lambda invoke --function-name {{.STACK_PREFIX}}-{{.STAGE}} --region {{.REGION}} /tmp/invoke-out.json
