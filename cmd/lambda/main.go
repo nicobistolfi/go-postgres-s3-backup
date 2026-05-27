@@ -103,7 +103,10 @@ func parseDatabaseURL(dbURL string) (DatabaseConfig, error) {
 	}, nil
 }
 
-func (h *BackupHandler) HandleRequest(ctx context.Context) error {
+// HandleRequest runs a backup. When force is true (manual /run invocation),
+// the daily backup is always stored even if its content matches the most
+// recent daily backup; otherwise an unchanged backup is skipped.
+func (h *BackupHandler) HandleRequest(ctx context.Context, force bool) error {
 	log.Println("Starting database backup...")
 
 	// Create backup using pg_dump
@@ -133,46 +136,48 @@ func (h *BackupHandler) HandleRequest(ctx context.Context) error {
 		existingChecksum, err := h.getObjectChecksum(ctx, mostRecentBackup)
 		if err == nil && existingChecksum == newChecksum {
 			contentChanged = false
-			log.Printf("Backup content unchanged from %s, skipping all uploads", mostRecentBackup)
+			if force {
+				log.Printf("Backup content unchanged from %s, but force is set; storing daily backup anyway", mostRecentBackup)
+			} else {
+				log.Printf("Backup content unchanged from %s, skipping all uploads", mostRecentBackup)
+			}
 		}
 	}
 
-	// Upload daily backup only if content changed
+	// Upload the daily backup when content changed, or always for a forced
+	// (manual) run.
 	dailyKey := fmt.Sprintf("daily/%s-backup.sql", day)
-	if contentChanged {
+	if contentChanged || force {
 		if err := h.uploadToS3WithChecksum(ctx, dailyKey, backupData, newChecksum); err != nil {
 			return fmt.Errorf("failed to upload daily backup: %w", err)
 		}
 		log.Printf("Daily backup uploaded: %s", dailyKey)
 	} else {
-		// Even though content hasn't changed, we might want to update the timestamp
-		// by creating a new file with today's date pointing to the same content
-		return nil // Skip all uploads if content hasn't changed
+		// Content unchanged and not forced: nothing to do.
+		return nil
 	}
 
-	// Only create monthly/yearly backups if content changed
-	if contentChanged {
-		// Check and create monthly backup if needed
-		monthlyKey := fmt.Sprintf("monthly/%s-backup.sql", month)
-		if exists, err := h.objectExists(ctx, monthlyKey); err != nil {
-			return fmt.Errorf("failed to check monthly backup: %w", err)
-		} else if !exists {
-			if err := h.uploadToS3WithChecksum(ctx, monthlyKey, backupData, newChecksum); err != nil {
-				return fmt.Errorf("failed to upload monthly backup: %w", err)
-			}
-			log.Printf("Monthly backup created: %s", monthlyKey)
+	// Create monthly/yearly backups if they don't exist yet.
+	// Check and create monthly backup if needed
+	monthlyKey := fmt.Sprintf("monthly/%s-backup.sql", month)
+	if exists, err := h.objectExists(ctx, monthlyKey); err != nil {
+		return fmt.Errorf("failed to check monthly backup: %w", err)
+	} else if !exists {
+		if err := h.uploadToS3WithChecksum(ctx, monthlyKey, backupData, newChecksum); err != nil {
+			return fmt.Errorf("failed to upload monthly backup: %w", err)
 		}
+		log.Printf("Monthly backup created: %s", monthlyKey)
+	}
 
-		// Check and create yearly backup if needed
-		yearlyKey := fmt.Sprintf("yearly/%s-backup.sql", year)
-		if exists, err := h.objectExists(ctx, yearlyKey); err != nil {
-			return fmt.Errorf("failed to check yearly backup: %w", err)
-		} else if !exists {
-			if err := h.uploadToS3WithChecksum(ctx, yearlyKey, backupData, newChecksum); err != nil {
-				return fmt.Errorf("failed to upload yearly backup: %w", err)
-			}
-			log.Printf("Yearly backup created: %s", yearlyKey)
+	// Check and create yearly backup if needed
+	yearlyKey := fmt.Sprintf("yearly/%s-backup.sql", year)
+	if exists, err := h.objectExists(ctx, yearlyKey); err != nil {
+		return fmt.Errorf("failed to check yearly backup: %w", err)
+	} else if !exists {
+		if err := h.uploadToS3WithChecksum(ctx, yearlyKey, backupData, newChecksum); err != nil {
+			return fmt.Errorf("failed to upload yearly backup: %w", err)
 		}
+		log.Printf("Yearly backup created: %s", yearlyKey)
 	}
 
 	// Clean up old daily backups (retention period from DAILY_BACKUP_RETENTION_DAYS env var, default 7 days)
@@ -452,8 +457,8 @@ func (h *BackupHandler) dispatch(ctx context.Context, raw json.RawMessage) (any,
 		return h.handleHTTP(ctx, req), nil
 	}
 
-	// Scheduled or direct invocation: no HTTP response expected.
-	return nil, h.HandleRequest(ctx)
+	// Scheduled or direct invocation: no HTTP response expected, dedupe applies.
+	return nil, h.HandleRequest(ctx, false)
 }
 
 // handleHTTP authenticates the API Gateway request, runs the backup, and
@@ -464,7 +469,8 @@ func (h *BackupHandler) handleHTTP(ctx context.Context, req events.APIGatewayV2H
 		return jsonResponse(401, map[string]string{"error": "unauthorized"})
 	}
 
-	if err := h.HandleRequest(ctx); err != nil {
+	// Manual runs always store a daily backup, even if content is unchanged.
+	if err := h.HandleRequest(ctx, true); err != nil {
 		log.Printf("backup failed: %v", err)
 		return jsonResponse(500, map[string]string{"error": "backup failed"})
 	}
