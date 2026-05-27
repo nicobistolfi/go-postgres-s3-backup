@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            coverage.out
+            coverage.txt
             coverage.html
           key: test-coverage-${{ runner.os }}-${{ github.sha }}-${{ hashFiles('**/*.go', '**/*_test.go') }}
           restore-keys: |
@@ -120,10 +120,11 @@ jobs:
       - name: Run tests with coverage
         run: task test:coverage
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
-          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.txt
           fail_ci_if_error: false
 
       - name: Upload test results
@@ -131,7 +132,7 @@ jobs:
         with:
           name: test-artifact
           path: |
-            coverage.out
+            coverage.txt
             coverage.html
 
   lint:

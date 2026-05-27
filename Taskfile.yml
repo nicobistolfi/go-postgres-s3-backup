@@ -41,8 +41,8 @@ tasks:
   test:coverage:
     desc: Run tests with coverage
     cmds:
-      - go test -v -coverprofile=coverage.out ./...
-      - go tool cover -func=coverage.out
+      - go test -v -coverprofile=coverage.txt ./...
+      - go tool cover -func=coverage.txt
 
   fmt:check:
     desc: Check Go code formatting
@@ -92,7 +92,7 @@ tasks:
       - rm -f {{.LAMBDA_ZIP}}
       - rm -f {{.LAYER_ZIP}}
       - rm -f {{.CF_PACKAGED_TEMPLATE}}
-      - rm -f coverage.out
+      - rm -f coverage.txt
 
   cf:package:
     desc: Build the Lambda binary and layer, zip them, and upload via `aws cloudformation package`
