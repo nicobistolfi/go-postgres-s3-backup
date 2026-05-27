@@ -10,6 +10,10 @@ Parameters:
     Type: String
     NoEcho: true
     Description: PostgreSQL connection string passed to the Lambda as DATABASE_URL
+  ApiKey:
+    Type: String
+    NoEcho: true
+    Description: API key required to call the /run endpoint (X-Api-Key header or api_key query param)
   DailyBackupRetentionDays:
     Type: Number
     Default: 7
@@ -128,6 +132,7 @@ Resources:
           DATABASE_URL: !Ref DatabaseUrl
           BACKUP_BUCKET: !Ref BackupBucket
           DAILY_BACKUP_RETENTION_DAYS: !Ref DailyBackupRetentionDays
+          API_KEY: !Ref ApiKey
 
   ScheduleRule:
     Type: AWS::Events::Rule
@@ -148,6 +153,46 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt ScheduleRule.Arn
 
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub 'go-postgres-s3-backup-${Stage}'
+      Description: HTTP API exposing the manual backup trigger
+      ProtocolType: HTTP
+
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt BackupFunction.Arn
+      # Lambda proxy integrations are always invoked over POST regardless of
+      # the route method; the route below exposes GET /run to clients.
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  HttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /run'
+      Target: !Sub 'integrations/${HttpApiIntegration}'
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+
+  HttpApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BackupFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/run'
+
 Outputs:
   FunctionName:
     Description: Lambda function name
@@ -158,3 +203,6 @@ Outputs:
   BackupBucketName:
     Description: S3 bucket that stores backups
     Value: !Ref BackupBucket
+  RunEndpoint:
+    Description: URL of the GET /run backup trigger endpoint
+    Value: !Sub '${HttpApi.ApiEndpoint}/run'
